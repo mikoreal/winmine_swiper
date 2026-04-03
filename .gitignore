@@ -1,0 +1,20 @@
+# output
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+*.vcxproj.user
+
+.vs/
+x64/
+x86/
+Release/**
+Debug/**
+winmine_$wiper/**
+*.obj
+*.pdb
+*.ilk
+*.tlog
+*.idb
