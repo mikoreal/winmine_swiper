@@ -1,5 +1,4 @@
-#ifndef PROC_H
-#define PROC_H
+#pragma once
 
 #include <cstddef>
 #include <vector>
@@ -15,5 +14,3 @@ uintptr_t FindDMAAddy(HANDLE hProc, uintptr_t ptr, std::vector<unsigned int> off
 namespace Memory {
 	std::vector<std::byte> ReadBytes(HANDLE hProcess, uintptr_t ptr, SIZE_T length);
 }
-
-#endif

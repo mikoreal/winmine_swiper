@@ -1,4 +1,4 @@
-#include "MinesweeperGame.h"
+#include "game.h"
 #include "proc.h"
 #include <print>
 

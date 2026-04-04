@@ -7,12 +7,11 @@
 *.so
 *.vcxproj.user
 
-.vs/
-x64/
-x86/
-Release/**
-Debug/**
-winmine_$wiper/**
+**/.vs/
+**/x64/
+**/x86/
+**/Release/
+**/Debug/
 *.obj
 *.pdb
 *.ilk
