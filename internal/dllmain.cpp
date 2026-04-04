@@ -1,9 +1,11 @@
 // dllmain.cpp : Defines the entry point for the DLL application.
 #include "pch.h"
 #include "common.h"
+#include "hook.h"
 
 DWORD WINAPI MineswiperThread(LPVOID lpParam)
 {
+	auto inputHook = HK::WindowProcedure::createHook(game::windowName);
 	return 0;
 }
 
