@@ -4,7 +4,10 @@ All knowledge used to create the cheating tool was gained through RE process and
 
 **[Hacking Minesweeper - static and dynamic analysis of `winmine.exe`](hacking-minesweeper-writeup/hacking-minesweeper-writeup.md)**
 
-The full reverse-engineering process in 19 pages, from `rand` in the import table to `onRightClickField` at offset `0x374F`.
+The full reverse-engineering process in 19 pages, starting from gathering basic information about the binary, formulating a starting point and static analysis. Findings are then confirmed through later dynamic analysis and documented.
+
+The project below is a demo cheat tool `winmine_swiper`. It demonstrates how the knowledge gained during such RE process can be applied to hack the game. While it's a game from 2001 with no multiplayer components I believe it's still a great starting point for anyone getting into the RE of Windows binaries. I should be telling myself that more often but: **You need to learn to walk, before you learn to run** :) 
+
 
 Also available as [LaTeX source](hacking-minesweeper-writeup/hacking-minesweeper-writeup.tex), and as the
 original thesis excerpt in PDF ([English](hacking-minesweeper-writeup/ref3_en.pdf) · [Polish](hacking-minesweeper-writeup/ref3_pl.pdf)).

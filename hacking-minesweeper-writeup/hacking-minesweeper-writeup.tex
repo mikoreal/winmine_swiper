@@ -1,6 +1,4 @@
-% Hacking Minesweeper --- static and dynamic analysis of winmine.exe
-% Standalone writeup, rewritten from the research chapter of a bachelor's thesis.
-% Build:  pdflatex hacking-minesweeper-writeup.tex   (run twice for references)
+% Hacking Minesweeper - static and dynamic analysis of winmine.exe
 
 \documentclass[11pt,a4paper]{article}
 
@@ -79,7 +77,7 @@ Our initial goal was to find the place in memory where the game stores informati
 minefield. To get there, it is worth running a thought experiment first: how would we
 implement the board if we were the programmer of Minesweeper?
 
-Recreating the game --- for an example board of $9\times9$ --- requires storing, for each
+Let us take an example board of $9\times9$. Recreating the game requires storing, for each
 cell, properties such as:
 \begin{itemize}
   \item coordinates (row and column index),
