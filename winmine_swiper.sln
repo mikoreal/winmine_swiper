@@ -5,13 +5,6 @@ VisualStudioVersion = 17.7.34003.232
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "external", "external\external_swiper.vcxproj", "{724EFE1D-17A9-42D9-89CE-BC9F8D0731BE}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "internal", "internal\internal_swiper.vcxproj", "{8860B6B1-ADD9-4BFA-BEAE-E8B1A98E1E9B}"
-EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{E3FD06C6-D0D7-434F-8CCA-CC4D4EDAC593}"
-	ProjectSection(SolutionItems) = preProject
-		shared\common.h = shared\common.h
-	EndProjectSection
-EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x86 = Debug|x86
@@ -22,10 +15,6 @@ Global
 		{724EFE1D-17A9-42D9-89CE-BC9F8D0731BE}.Debug|x86.Build.0 = Debug|Win32
 		{724EFE1D-17A9-42D9-89CE-BC9F8D0731BE}.Release|x86.ActiveCfg = Release|Win32
 		{724EFE1D-17A9-42D9-89CE-BC9F8D0731BE}.Release|x86.Build.0 = Release|Win32
-		{8860B6B1-ADD9-4BFA-BEAE-E8B1A98E1E9B}.Debug|x86.ActiveCfg = Debug|Win32
-		{8860B6B1-ADD9-4BFA-BEAE-E8B1A98E1E9B}.Debug|x86.Build.0 = Debug|Win32
-		{8860B6B1-ADD9-4BFA-BEAE-E8B1A98E1E9B}.Release|x86.ActiveCfg = Release|Win32
-		{8860B6B1-ADD9-4BFA-BEAE-E8B1A98E1E9B}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -1,0 +1,689 @@
+% Hacking Minesweeper --- static and dynamic analysis of winmine.exe
+% Standalone writeup, rewritten from the research chapter of a bachelor's thesis.
+% Build:  pdflatex hacking-minesweeper-writeup.tex   (run twice for references)
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{tgtermes}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\graphicspath{{img/}}
+
+\captionsetup{font=small,labelfont=bf}
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+
+\lstdefinestyle{code}{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{black!4},
+  frame=single,
+  rulecolor=\color{black!25},
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  xleftmargin=0.5em,
+  framexleftmargin=0.5em,
+}
+\lstset{style=code}
+
+\newcommand{\figw}[3]{%
+  \begin{figure}[htbp]
+    \centering
+    \includegraphics[width=#2\textwidth]{#1}
+    \caption{#3}
+  \end{figure}}
+
+\title{\textbf{Hacking Minesweeper}\\[0.3em]
+       \large Static and dynamic analysis of \texttt{winmine.exe}}
+\author{Miko\l{}aj Czermak \\ \texttt{github.com/mikoreal}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\noindent
+This is the research chapter of my bachelor's thesis, rewritten as a standalone writeup and
+translated from Polish. It documents how the Minesweeper board was located in the game's
+memory, how the meaning of every byte of that board was decoded, and how the game's own
+``place a flag'' function was found so that it could later be called remotely.
+
+\textbf{Target:} \texttt{winmine.exe}, Windows XP build, 32-bit PE, no packing or obfuscation.\\
+\textbf{Tools:} IDA Free (disassembler, decompiler, debugger, IDC scripting) and CrySearch
+(memory scanner).
+
+\tableofcontents
+\newpage
+
+
+\section{Static analysis}
+
+The analysis began by loading the game's executable into IDA Free. The file format was
+correctly recognised as ``Portable Executable for 80386'', which in plain terms means a
+standard 32-bit Windows application. The default loading options were accepted.
+
+\figw{01-ida-initial-view.png}{0.95}{IDA Free, initial view after loading \texttt{winmine.exe}.}
+
+Our initial goal was to find the place in memory where the game stores information about the
+minefield. To get there, it is worth running a thought experiment first: how would we
+implement the board if we were the programmer of Minesweeper?
+
+Recreating the game --- for an example board of $9\times9$ --- requires storing, for each
+cell, properties such as:
+\begin{itemize}
+  \item coordinates (row and column index),
+  \item interaction state (unrevealed, revealed, flagged),
+  \item logical content (empty, digit, mine).
+\end{itemize}
+
+To simplify the architecture, the last two can be collapsed into a single attribute
+representing the combined variants of state and content (e.g. ``unrevealed-mine'' or
+``revealed-digit''). For requirements specified that way, a natural implementation emerges: a
+two-dimensional array of integers. The array indices map directly onto cell coordinates, and
+the numeric value stored in each element defines the state of that cell. Such a data type is
+entirely sufficient for the game logic to work.
+
+Formulating that hypothesis does not, however, solve the problem of locating the code that
+reads and modifies the board inside the binary. We can be confident such code exists --- most
+likely functions accessing the minefield. They must run both before each new game (to clear
+the board and generate fresh mine positions) and during it, as the player's moves change the
+state of individual cells.
+
+Continuing from a software-engineering perspective: placing mines on the board is
+unquestionably based on drawing cell indices at random. Since the game mechanics do not
+require cryptographically secure randomness, the authors of Minesweeper most likely used a
+standard pseudo-random number generator --- the one built into the development environment's
+runtime, i.e. the C standard library.
+
+Information about the external functions a PE imports at startup is recorded in its Import
+Address Table (IAT). In IDA Free this is available under
+\texttt{View > Open subviews > Imports}.
+
+\figw{02-imports-iat.png}{0.85}{The Import Address Table of \texttt{winmine.exe}.
+\texttt{srand} and \texttt{rand} are imported from \texttt{msvcrt.dll}.}
+
+The IAT does indeed reveal the import of two well-known pseudo-random number functions:
+\texttt{srand} and \texttt{rand}. They come from \texttt{msvcrt.dll} (the Microsoft C Runtime
+Library), which provides the C standard library implementation on Windows. \texttt{srand}
+initialises the generator's seed; \texttt{rand} returns the computed pseudo-random values.
+
+Importing these functions is not by itself conclusive proof that they are used by the mine
+placement algorithm. To verify the hypothesis we need to trace control flow and identify every
+place in the code that references the \texttt{rand} symbol. In IDA this was done by navigating
+to the import address \texttt{0x010011B0} in the Imports view and using the built-in
+cross-reference search (XREFs), which lists every address in the file that calls or otherwise
+references the symbol of interest.
+
+\figw{03-xrefs-rand.png}{0.95}{Cross-references (XREFs) to the \texttt{rand} symbol ---
+only two, both inside \texttt{sub\_1003940}.}
+
+In the entire executable there are only \textbf{two} references to \texttt{rand}. Both are
+direct calls, and both are located inside a single function which IDA --- the original symbols
+having been stripped at compile time --- automatically named \texttt{sub\_1003940}. This
+significantly narrows the search: all machine code associated with generating pseudo-random
+numbers sits in one block. It also keeps the cost low if the hypothesis has to be rejected.
+\texttt{sub\_1003940} was therefore inspected in detail.
+
+\figw{04-disasm-sub1003940.png}{0.5}{The disassembly of \texttt{sub\_1003940}.}
+
+Using the decompiler bundled with IDA Free we can obtain pseudocode close to C, which is
+easier to analyse.
+
+\figw{05-pseudocode-sub1003940.png}{0.7}{The C pseudocode of \texttt{sub\_1003940} produced by
+the IDA decompiler.}
+
+The decompiler's interpretation confirms the conclusions drawn from the machine code.
+\texttt{sub\_1003940} takes one \texttt{int} parameter, temporarily named \texttt{a1}, and
+returns an \texttt{int}. It calls \texttt{rand()}, then returns the remainder of dividing that
+value by \texttt{a1}. In short: \texttt{sub\_1003940} returns a pseudo-random number greater
+than or equal to zero and smaller than \texttt{a1}.
+
+We document this finding using ``Rename global item\ldots'' (the \textbf{N} key) and ``Edit
+func comment'' (the \textbf{/} key), naming the function \texttt{rand\_0} and annotating it
+with a short comment.
+
+\figw{06-rand0-documented.png}{0.7}{\texttt{rand\_0}, renamed and commented in the IDA project
+file.}
+
+Documenting findings this way propagates the change across the whole IDA database. From now on
+every occurrence of the function uses the name \texttt{rand\_0} instead of
+\texttt{sub\_1003940} and displays the first line of our comment, which improves readability
+and reduces information overload. \texttt{rand\_0} is, in effect, a wrapper around
+\texttt{rand()} from the C standard library.
+
+Just as we previously used ``List all cross references to\ldots'' to find calls to
+\texttt{rand()} and thereby documented \texttt{rand\_0(int a1)}, we now do the same for calls
+to \texttt{rand\_0} itself.
+
+\figw{07-xrefs-rand0.png}{0.95}{Cross-references to \texttt{rand\_0} --- again only two, both
+inside \texttt{sub\_100367A}.}
+
+The value of documenting the analysed machine code is immediately visible: the xrefs window now
+shows our own function name and comment. Fortunately for us, and just as before, there are only
+two references, and again they sit inside a single function --- this time
+\texttt{sub\_100367A}.
+
+\figw{08-disasm-sub100367A.png}{0.62}{The disassembly of \texttt{sub\_100367A}.}
+
+\figw{09-pseudocode-sub100367A.png}{0.62}{The C pseudocode of \texttt{sub\_100367A} produced by
+the IDA decompiler.}
+
+This gives us the next hypothesis: the local variables \texttt{v1} and \texttt{v2} hold the row
+and column indices of board cells containing mines. If we confirm it, that would mean
+\texttt{dword\_1005334} and \texttt{dword\_1005338} determine the number of rows and columns.
+To make further progress we test the hypothesis with dynamic analysis.
+
+
+\section{Dynamic analysis}
+
+Dynamic analysis differs from static analysis in that the software under study is executed on
+the researcher's machine and examined as it runs. It is indispensable for programs that are
+packed, obfuscated, or otherwise built to hide their true behaviour.
+
+We begin this segment by looking at \texttt{v1} and \texttt{v2} --- specifically at the values
+assigned to them when our documented \texttt{rand\_0(int a1)} is called during execution. We
+will also examine \texttt{dword\_1005334} and \texttt{dword\_1005338}, which bound the range of
+the drawn numbers.
+
+The goal is to halt execution at the instructions of interest and inspect the values assigned
+to \texttt{v1}, \texttt{v2}, \texttt{dword\_1005334} and \texttt{dword\_1005338}. We start with
+the latter two.
+
+\figw{10-pseudocode-dimensions.png}{0.72}{The C pseudocode of \texttt{sub\_100367A} with the
+\texttt{dword\_\ldots} variables highlighted.}
+
+As seen in lines 23 and 24 of the decompiled pseudocode, both are passed as arguments to
+\texttt{rand\_0}. In line 23 \texttt{v1} is assigned \texttt{rand\_0(dword\_1005334) + 1}. The
+expression \texttt{rand\_0(x)} returns a pseudo-random number from the range $\langle 0, x)$,
+and because of the trailing \texttt{+ 1} the whole expression returns a number from
+$\langle 1, x{+}1)$. Since we know the result is an integer, the range simplifies to
+$\langle 1, x\rangle$. Translating this to our specific calls: \texttt{v1} holds an integer
+from $\langle 1, \texttt{dword\_1005334}\rangle$, and \texttt{v2}, analogously, from
+$\langle 1, \texttt{dword\_1005338}\rangle$.
+
+The \texttt{dword\_\ldots} variables also appear in a few places other than lines 23--24 inside
+\texttt{sub\_100367A}. In line 9 they are compared, and in lines 14--15 they are assigned the
+values the program then uses to constrain \texttt{v1} and \texttt{v2} as described above.
+
+We therefore switch back from the pseudocode to the disassembly view, in order to halt
+execution at a specific machine-code instruction --- we are interested in lines 14--15 of the
+pseudocode, that is, the assignments to the \texttt{dword\_\ldots} variables. Right-clicking
+line 15 and choosing \texttt{Synchronize With > IDA View-A, Hex View-1} highlights the
+corresponding instruction in green once we switch to the disassembly view.
+
+\figw{11-ida-synchronize.png}{0.95}{Synchronising the IDA pseudocode and disassembly views.}
+
+Next, to halt execution at the \texttt{mov dword\_\ldots, eax/ecx} instructions, we right-click
+each line and choose ``Add Breakpoint''.
+
+\figw{12-ida-add-breakpoint.png}{0.5}{Adding a breakpoint on the instruction of interest.}
+
+To automate the process we attach, via ``Edit Breakpoint'', a script in IDC --- IDA's native
+scripting language --- which prints a short message to the Output window each time the
+instruction executes, reporting the relevant register: \texttt{eax} for
+\texttt{dword\_1005334} and \texttt{ecx} for \texttt{dword\_1005338}.
+
+We then run the program under IDA's built-in debugger. The game starts and our script reports
+that both variables were assigned the value \textbf{9}. Note that $9\times9$ is exactly the
+board size of Minesweeper's ``Beginner'' level. Without closing the program, we switch the
+difficulty to ``Intermediate'', where the board has 16 rows and 16 columns --- and those are
+exactly the values our script reports.
+
+\figw{13-dimensions-beginner-intermediate.png}{0.85}{The IDC breakpoint script reporting
+$9\times9$ for Beginner, then $16\times16$ for Intermediate.}
+
+So the two \texttt{dword\_\ldots} variables store the dimensions of the board. One question
+remains: which of them is the width and which is the height? A square board cannot answer that,
+so we select ``Custom'' mode in the game and deliberately choose asymmetric values --- height
+9, width 15.
+
+\figw{14-dimensions-custom-9x15.png}{0.85}{A custom board of height 9 and width 15 ---
+\texttt{dword\_1005334} reports 15, \texttt{dword\_1005338} reports 9.}
+
+This proves that \texttt{dword\_1005334} holds the \textbf{width} (number of columns) and
+\texttt{dword\_1005338} the \textbf{height} (number of rows). We rename them to \texttt{width}
+and \texttt{height} in the database.
+
+Since these variables bound the drawn numbers, \texttt{v1} and \texttt{v2} take values from
+$\langle 1, \texttt{width}\rangle$ and $\langle 1, \texttt{height}\rangle$ respectively. And
+since this is the only place in the program where any numbers are drawn at random ---
+additionally drawn with the range constrained to the board's dimensions --- we have proven that
+\texttt{v1} and \texttt{v2} hold indices of random cells on the board.
+
+That leads to the next hypothesis: during a single breakpoint hit, \texttt{v1} and \texttt{v2}
+hold the position indices of one of the mines. We verify it exactly as we verified the
+\texttt{dword\_\ldots} variables, with a breakpoint script that prints the assigned values.
+
+
+\section{Reconstructing the minefield map}
+
+The game was restored to ``Beginner'' mode, where 10 mines are placed on a $9\times9$ board.
+With breakpoints and scripts set on \texttt{v1} and \texttt{v2}, we obtain --- consistent with
+the earlier findings --- values between 1 and 9 inclusive.
+
+One question remains: how are the row and column indices counted? They could be counted in
+several ways. Taking advantage of being in the middle of dynamic analysis, we play a round that
+we deliberately lose, because after a lost game Minesweeper reveals the location of every mine,
+letting us see how rows and columns are indexed. We then map the drawn indices onto the
+corresponding mines on the board.
+
+\figw{15-mine-indices-mapped.png}{0.8}{The captured register values (board indices) mapped onto
+the revealed minefield.}
+
+After a short manual assignment we have our answer: \textbf{row indices are counted from 1, top
+to bottom; column indices are counted from 1, left to right.}
+
+Moreover, \texttt{v1} and \texttt{v2} were assigned 10 times during a single game --- exactly
+the number of mines in ``Beginner'' mode. For documentation, \texttt{v1} and \texttt{v2} were
+therefore renamed to \texttt{mineColumnIdx} and \texttt{mineRowIdx} respectively.
+
+Having proven that \texttt{mineColumnIdx} and \texttt{mineRowIdx} define the location of the
+mines, analysis of the pseudocode reveals the key operation of the program.
+
+\figw{16-pseudocode-line27.png}{0.85}{The C pseudocode of the mine-placement loop, with line 27
+marked.}
+
+Line 27 contains the instruction:
+
+\begin{lstlisting}
+byte_1005340[32 * mineRowIdx + mineColumnIdx] |= 0x80u;
+\end{lstlisting}
+
+The expression \texttt{32 * row + column} is a way of mapping a two-dimensional array onto a
+one-dimensional block of RAM. \textbf{The width of a row in memory is always 32 bytes,
+regardless of the difficulty level.}
+
+Lines 26--27 are the last lines of the function that refer to \texttt{mineRowIdx} and
+\texttt{mineColumnIdx}. In both cases they are used to index the array \texttt{byte\_1005340}.
+Line 26 is the loop condition that redraws indices, and line 27 modifies the value of
+\texttt{byte\_1005340} at the index computed from the previously drawn values. With high
+confidence we can say that \texttt{byte\_1005340} is the array we are after, storing
+information about each cell of the minefield. Moreover, since it is an array of bytes, we can
+put forward the thesis that one byte is devoted to each cell.
+
+We also learned how cells with mines are marked in the game's memory. The expression
+\texttt{|= 0x80u} --- assigning the result of a bitwise OR with \texttt{0x80} --- sets the
+highest bit of the byte, which means that a value of \texttt{0x80} or higher at a given address
+signals the presence of a mine in that cell.
+
+The memory into which the mines are written is represented in IDA by the static database
+address \texttt{byte\_1005340}. Being certain of this address, we can move from the
+disassembler directly to a memory scanner.
+
+To verify the structure of the board in real time, CrySearch was used. Because Windows XP ---
+the system the examined application originates from --- loads \texttt{.exe} files at the default
+base address \texttt{0x01000000}, the address \texttt{0x01005340} seen in IDA translates to a
+relative \textbf{offset of \texttt{0x5340}} from the start of the game's module in the process.
+
+\figw{17-crysearch-open-process.png}{0.85}{Attaching the CrySearch memory scanner to the
+\texttt{winmine.exe} process.}
+
+Next, using the knowledge from the previous section, the offset of the first cell of the board
+was computed by substituting 1 for both indices:
+\[
+  32 \cdot (\texttt{mineRowIdx} = 1) + (\texttt{mineColumnIdx} = 1) = 33 = \texttt{0x21}
+\]
+The minefield array begins at \texttt{0x1005340}. From pointer arithmetic it follows that
+adding the computed offset to this address yields the address of the first cell. On this basis
+a general formula was derived for the address of any cell (row, column):
+\[
+  \text{address} = \texttt{0x1005340} + (32 \cdot \text{row} + \text{column})
+\]
+For the cell with indices $(1, 1)$ the formula gives \texttt{0x1005361}. That address was added
+to CrySearch using ``Manually add address'', with the data type set to ``Array of bytes'' of
+length 9 --- the number of cells in a row at the ``Beginner'' level.
+
+\figw{18-crysearch-row1.png}{0.85}{The first row of the board added to the CrySearch table ---
+\texttt{0F 0F 8F 0F 0F 0F 0F 0F 0F}.}
+
+As the figure above shows, for this particular instance of the game the third cell contains a
+mine: the byte corresponding to it is greater than or equal to \texttt{0x80}, which we
+established signals a mine.
+
+The extracted board buffer (the first row) was then put under continuous observation. In the
+game window a series of controlled interactions was carried out:
+\begin{itemize}
+  \item placing a flag on an unrevealed cell,
+  \item revealing an empty cell,
+  \item revealing a cell adjacent to mines (containing a digit).
+\end{itemize}
+
+\figw{19-crysearch-byte-observation.png}{0.75}{Observing the bytes of the first row of the
+minefield in memory during play.}
+
+By recording and comparing the values of individual bytes before an action and immediately
+after it, an unambiguous mapping of the game's visual states onto their numeric representation
+in RAM was identified. A cell takes the value \texttt{0x0F} by default (unrevealed); placing a
+flag overwrites that byte with \texttt{0x0E}. A cell containing a mine reads \texttt{0x8F}.
+Revealed cells take values corresponding to the number of adjacent mines --- e.g.
+\texttt{0x41} for a one, \texttt{0x42} for a two.
+
+This method of analysis --- observing the changes in memory caused by the player's actions ---
+made it possible to build a table of all possible states of a board cell. Understanding these
+values is a necessary condition for the deliberate memory manipulation performed by the tool.
+
+Two key bit flags were identified, describing the physical properties of a cell:
+
+\begin{table}[htbp]
+\centering
+\caption{Key bit flags determining the properties of a cell}
+\begin{tabular}{|c|>{\raggedright\arraybackslash}p{0.62\textwidth}|}
+\hline
+\textbf{Value} & \textbf{Meaning in the game logic} \\
+\hline
+\texttt{0x40} & The cell has been revealed by the player \\
+\hline
+\texttt{0x80} & A mine is hidden under the cell \\
+\hline
+\end{tabular}
+\end{table}
+
+The lower 5 bits describe the visual state of the cell:
+
+\begin{table}[htbp]
+\centering
+\caption{All possible states of a minefield cell byte}
+\begin{tabular}{|c|>{\raggedright\arraybackslash}p{0.26\textwidth}|>{\raggedright\arraybackslash}p{0.42\textwidth}|}
+\hline
+\textbf{Value} & \textbf{Meaning in the game logic} & \textbf{Additional explanation} \\
+\hline
+\texttt{0x00} & Empty cell (safe) & no mines in the neighbourhood \\
+\hline
+\texttt{0x01 - 0x08} & Cell with a digit (safe) & the digit indicates the number of mines adjacent to the cell \\
+\hline
+\texttt{0x0A} & Cell with a mine (loss) & a mine neither revealed nor flagged by the player; revealed at the end of a lost game \\
+\hline
+\texttt{0x0B} & Incorrectly flagged cell (safe) & erroneously flagged as containing a mine \\
+\hline
+\texttt{0x0C} & Cell with a mine (loss) & erroneous revealing of a cell containing a mine, resulting in detonation; occurs only on the cell whose revealing ended the game \\
+\hline
+\texttt{0x0D} & Cell with a question mark & marked by the player as uncertain with the right mouse button \\
+\hline
+\texttt{0x0E} & Cell with a flag & marked by the player as containing a mine with the right mouse button; correctly flagging every armed cell (and revealing all safe cells) results in a win \\
+\hline
+\texttt{0x0F} & Unrevealed cell & default state \\
+\hline
+\texttt{0x10} & Board margin & invisible frame bounding the board \\
+\hline
+\end{tabular}
+\end{table}
+
+The values from these two tables do not occur in memory in isolation. \textbf{The final byte of
+a cell is the result of superimposing --- through a logical OR --- the physical property and
+the visual state.} This means the values read by the memory scanner are precise logical sums:
+
+\begin{lstlisting}
+revealed empty cell:  (0x00) OR (0x40) = 0x40
+revealed digit 1:     (0x01) OR (0x40) = 0x41
+unrevealed mine:      (0x0F) OR (0x80) = 0x8F
+flagged mine:         (0x0E) OR (0x80) = 0x8E
+\end{lstlisting}
+
+The screenshot below confirms the theory across the whole board:
+
+\figw{20-crysearch-full-map.png}{0.95}{The full mapping of the minefield bytes to the memory of
+the game process. Note the \texttt{0x10} border bytes framing every row.}
+
+A lost game confirms the remaining, rarer states of the table:
+
+\figw{21-crysearch-lost-game.png}{0.9}{Memory after a lost game. \texttt{0xCC} =
+\texttt{0x0C | 0x40 | 0x80} is the detonated mine that ended the game; \texttt{0x8A} =
+\texttt{0x0A | 0x80} marks the other mines, revealed on loss.}
+
+At this point enough information has been gathered to implement the first feature of the tool
+--- previewing the minefield map. Such a map allows every game of Minesweeper to be won in
+considerably less time than would otherwise be possible. In the next section, going one step
+further, we gather the knowledge needed to implement automatic flag placement on every cell
+that contains a mine.
+
+
+\section{Locating the flag-placement function}
+
+The previous section answered the questions about the layout of the minefield in the game's
+memory. Focusing now on the second planned feature --- automatic mine flagging --- we examine
+the game's own internal function that places a flag on a given cell, so that our tool can call
+it remotely. When that function is invoked for each mine on the board, the effort required from
+the player to win a round is reduced to merely revealing the safe cells.
+
+Reusing an existing in-game function, rather than writing the cell byte directly, both
+minimises the work and avoids interfering with the game's stability: the game updates its own
+internal counters and repaints the cell exactly as it would for a real click.
+
+For this purpose we returned to CrySearch and the previously created
+\texttt{winmine\_crysearch.csat} file. Because the previous section reconstructed the minefield
+map from the game's memory, we have the rows laid out in CrySearch as slices of 11 bytes ---
+each row of the initial $9\times9$ board, plus the invisible border byte on either side.
+
+In section 2, while examining \texttt{rand\_0}, we wanted to determine what values are passed
+as arguments during its calls. We attached IDA's debugger to the game process and set
+breakpoints on specific machine-code instructions, and established that they were the board
+dimensions. Now we want something similar, but approached from the other side: the address of
+the instruction that \emph{overwrites} the values of the minefield cells.
+
+To find it, we set a breakpoint on the memory address of a single cell. The cell with indices
+$(1, 1)$ was chosen --- the one visible in the upper-left corner of the board --- for which the
+formula gives the address \texttt{0x1005361}. Using CrySearch, a debugger was attached to the
+\texttt{winmine.exe} process. In the memory view the address of interest was added, and a
+breakpoint of type ``Write'' was set on it via \texttt{Set Breakpoint -> Write}. We then
+returned to the game and right-clicked the cell in the upper-left corner of the board.
+
+\figw{22-crysearch-write-bp.png}{0.7}{The write breakpoint on cell $(1, 1)$ triggered by the
+instruction at \texttt{1002ECB}.}
+
+After flagging the cell, the breakpoint on the address storing that cell's state byte was
+activated by the instruction at address \texttt{1002ECB} ---
+\texttt{mov byte ptr [eax], dl}. The captured registers are already informative:
+\texttt{EAX = 1005361} (the address of cell $(1, 1)$), \texttt{EBX = 1}, \texttt{ECX = 1} (its
+indices) and \texttt{EDX = E} --- the flag state from Table 2.
+
+For readability we returned to the IDA project file and, in the disassembly view, jumped to the
+address of interest using the ``Jump to address'' dialog (shortcut \textbf{G}), entering
+\texttt{1002ECB}.
+
+\figw{23-disasm-sub1002EAB.png}{0.62}{The disassembly of \texttt{sub\_1002EAB}, the function
+containing the write at \texttt{1002ECB}.}
+
+The instruction \texttt{0x1002ECB} that triggered the breakpoint turns out to be part of a
+function beginning at \texttt{0x1002EAB}. This function seems an ideal candidate for a remote
+call to change the logical and graphical state of a specific cell.
+
+While gathering the information needed for the remote call we examine the function's signature
+--- and run into a problem. \texttt{sub\_1002EAB} takes three arguments. Two are integers,
+which given the context (the function is called for a specific cell) most likely means they are
+the row and column indices. The last one, however, is of type \texttt{char}. The \texttt{char}
+type is one byte wide, exactly the size of a single element of the minefield array. We can
+therefore suppose it determines the new state of the cell, or a bitmask to be combined with the
+current state.
+
+The body of the function settles it:
+
+\begin{lstlisting}[language={[x86masm]Assembler}]
+shl  eax, 5                      ; row * 32
+lea  eax, b_minefield[eax+ecx]   ; &minefield[32*row + col]
+mov  dl, [eax]                   ; current cell byte
+and  dl, 0E0h                    ; keep the high 3 bits (physical properties)
+or   dl, [esp+4+arg_8]           ; OR in the third argument
+mov  [eax], dl                   ; write back
+\end{lstlisting}
+
+The function preserves the cell's physical property bits and replaces the low bits with the
+third argument. That is precisely the ``physical OR visual'' composition established in
+section 3 --- so the \texttt{char} argument is the new \textbf{visual state}.
+
+Before capturing its value at runtime, let us look at every reference to \texttt{0x1002EAB} in
+the program, using the cross-references view (shortcut \textbf{X}).
+
+\figw{24-xrefs-sub1002EAB.png}{0.62}{The three call sites of \texttt{sub\_1002EAB}.}
+
+The xrefs window points to three different places in the machine code where the analysed
+subprogram is called --- inside procedures at the addresses:
+\begin{enumerate}
+  \item \texttt{0x1003512}
+  \item \texttt{0x10035B7}
+  \item \texttt{0x100374F}
+\end{enumerate}
+For readability we refer to these procedures by the numbers above, or by their offset relative
+to the file's \texttt{ImageBase}.
+
+An interesting relationship is visible. Functions 1 (offset \texttt{0x3512}) and 2 (offset
+\texttt{0x35B7}) call \texttt{sub\_1002EAB} always passing the hard-coded value \texttt{0x4C}
+as the third argument. Comparing \texttt{0x4C} against Table 2 shows a familiar composition of
+two bit flags --- \texttt{0x40} (the cell has been revealed by the player) and \texttt{0x0C} (a
+cell with a mine; a value visible in memory only after a loss caused by revealing an armed
+cell):
+
+\begin{quote}
+revealed mine (detonation; loss): \texttt{(0x0C) OR (0x40) = 0x4C}
+\end{quote}
+
+So functions 1 and 2 are the game's loss paths, not what we want.
+
+Function 3 (offset \texttt{0x374F}), in turn, uses no hard-coded value. Instead it executes a
+series of conditional instructions and makes the argument depend on them.
+
+\figw{25-pseudocode-sub100374F.png}{0.7}{The C pseudocode of the function at
+\texttt{0x100374F}.}
+
+Reading the pseudocode, \texttt{v3} is the cell's current visual state and \texttt{v4} the new
+one:
+
+\begin{table}[htbp]
+\centering
+\caption{The right-click state cycle implemented by \texttt{sub\_100374F}}
+\begin{tabular}{|l|>{\raggedright\arraybackslash}p{0.38\textwidth}|l|}
+\hline
+\textbf{Current state \texttt{v3}} & \textbf{New state \texttt{v4}} & \textbf{Also does} \\
+\hline
+\texttt{0xE} (flag) & \texttt{0xD} or \texttt{0xF}, depending on whether the ``Marks (?)''
+option is enabled & \texttt{sub\_100346A(1)} \\
+\hline
+\texttt{0xD} (question mark) & \texttt{0xF} (unrevealed) & --- \\
+\hline
+anything else (\texttt{0xF}) & \texttt{0xE} (flag) & \texttt{sub\_100346A(-1)} \\
+\hline
+\end{tabular}
+\end{table}
+
+This is exactly the right-click cycle the player sees: unrevealed $\rightarrow$ flag
+$\rightarrow$ question mark $\rightarrow$ unrevealed, with the remaining-mines counter adjusted
+on each transition.
+
+As a final verification that \texttt{sub\_100374F} is the function responsible for marking a
+cell with a flag or a question mark, IDA's debugger was attached to the game and breakpoints
+were set at each of the three addresses: 1 (offset \texttt{0x3512}), 2 (offset
+\texttt{0x35B7}), 3 (offset \texttt{0x374F}). An arbitrary cell was then right-clicked, and
+only one breakpoint fired --- the one belonging to \texttt{sub\_100374F}. For documentation it
+was given the friendlier name \texttt{onRightClickField(int row, int column)} in the IDA
+project file.
+
+One practical consequence of the cycle above: calling \texttt{onRightClickField} on a cell that
+is already flagged does \textbf{not} keep it flagged --- it advances it to the next state. The
+tool must therefore call it exactly once per unflagged mine.
+
+
+\section{Summary of findings}
+
+This writeup documents the static and dynamic analysis of the game's executable. The analytical
+process was aimed at gathering the information needed to build a tool for Minesweeper, with the
+initial goal defined as ``finding the place in memory where information about the board (the
+minefield) is stored''.
+
+Starting from that point, a thought experiment was carried out about how the minefield would be
+implemented from a software-engineering perspective. It followed that the game's authors must
+have used a pseudo-random number generator. Static analysis of the Import Address Table
+identified references to \texttt{rand()} and \texttt{srand()} from \texttt{msvcrt.dll}. The only
+call to the imported \texttt{rand()} was found inside the function at \texttt{0x1003940};
+further analysis produced its full documentation and the rename to \texttt{rand\_0}. Analysing
+the calls to \texttt{rand\_0} led to the only place in the game's machine code where
+pseudo-random numbers are generated --- the function at \texttt{0x100367A} --- and to the
+hypothesis that mine positions are drawn there.
+
+Dynamic analysis with a debugger attached to a live instance of the game then confirmed, using
+IDC breakpoint scripts, that \texttt{dword\_1005334} and \texttt{dword\_1005338} store the width
+and the height of the board respectively --- disambiguated by deliberately using a non-square
+custom board.
+
+Attention then turned to reconstructing the minefield map. The variables \texttt{v1} and
+\texttt{v2}, bounded by the width and the height, were confirmed to hold the column and row
+indices of each drawn mine position, and were renamed to \texttt{mineColumnIdx} and
+\texttt{mineRowIdx}. Staying inside \texttt{0x100367A}, the key structure of the minefield and
+its address were identified: the game stores the minefield as an array of bytes at
+\texttt{0x1005340}, with a formula for the address of any cell of
+$\texttt{0x1005340} + (32 \cdot \text{row} + \text{column})$. Using CrySearch, all possible cell
+states were mapped and described in Table 2. At this stage all information needed to implement
+the board-preview feature had been acquired.
+
+Attention was then directed at automatic flagging. To minimise the workload and avoid
+interfering with the game's stability, it was decided to reuse one of the game's own functions,
+called remotely by the tool. The function at offset \texttt{0x374F} was established to be the
+one responsible for marking a cell after a right mouse click; it was documented and renamed
+\texttt{onRightClickField(int row, int column)}.
+
+Without the information gathered in these analyses, building the tool would have been
+considerably more difficult, if not impossible.
+
+
+\section{From findings to code}
+
+Every finding above became a constant in \texttt{external/common.h}. This table is the bridge
+between the analysis and the implementation.
+
+\begin{longtable}{|>{\raggedright\arraybackslash}p{0.40\textwidth}|c|>{\raggedright\arraybackslash}p{0.34\textwidth}|}
+\hline
+\textbf{Finding} & \textbf{Section} & \textbf{Constant in \texttt{common.h}} \\
+\hline
+\endhead
+XP loads the image at \texttt{0x01000000} & 3 & \texttt{winmine::IMAGE\_BASE = 0x1000000} \\
+\hline
+Board width at \texttt{0x01005334} $\rightarrow$ offset \texttt{0x5334} & 2 & \texttt{offset::BOARD\_WIDTH = 0x5334} \\
+\hline
+Board height at \texttt{0x01005338} $\rightarrow$ offset \texttt{0x5338} & 2 & \texttt{offset::BOARD\_HEIGHT = 0x5338} \\
+\hline
+Minefield array at \texttt{0x01005340} $\rightarrow$ offset \texttt{0x5340} & 3 & \texttt{offset::MINEFIELD = 0x5340} \\
+\hline
+Row stride is always 32 bytes & 3 & \texttt{ROW\_STRIDE = 0x20} \\
+\hline
+\texttt{address = base + 0x5340 + 32*row + col}, 1-indexed & 3 & \texttt{cellOffset(row, col)} \\
+\hline
+Bit \texttt{0x80} = mine present & 3, Table 1 & \texttt{cell::MINE\_MASK = 0x80} \\
+\hline
+Bit \texttt{0x40} = revealed by the player & 3, Table 1 & \texttt{cell::REVEALED\_MASK = 0x40} \\
+\hline
+Low 5 bits = visual state & 3, Table 2 & \texttt{cell::STATE\_MASK = 0x1F} \\
+\hline
+Visual states \texttt{0x00}, \texttt{0x0A}--\texttt{0x10} & 3, Table 2 & \texttt{cell::EMPTY}, \texttt{MINE\_SHOWN}, \texttt{WRONG\_FLAG}, \texttt{MINE\_HIT}, \texttt{QUESTION}, \texttt{FLAG}, \texttt{UNREVEALED}, \texttt{BORDER} \\
+\hline
+\texttt{onRightClickField(row, col)} at offset \texttt{0x374F} & 4 & \texttt{offset::FN\_ON\_RIGHT\_CLICK\_FIELD = 0x374F} \\
+\hline
+\end{longtable}
+
+The board preview reads the array row by row with \texttt{ReadProcessMemory} and decodes each
+byte against Table 2. The auto-flag feature allocates a page in the game process, writes a small
+shellcode stub that calls \texttt{onRightClickField} with the arguments for one mine, and runs
+it with \texttt{CreateRemoteThread} --- once per mine. See \texttt{external/game.cpp}.
+
+
+\section*{Notes}
+\addcontentsline{toc}{section}{Notes}
+
+\begin{itemize}
+  \item The analysis targets the Windows XP build of \texttt{winmine.exe}, a 32-bit binary
+        Microsoft stopped shipping with Windows Vista. The addresses above are specific to that
+        build.
+  \item The binary itself is not distributed in this repository.
+  \item Originally written as the research chapter of my bachelor's thesis and rewritten here
+        as a standalone writeup.
+\end{itemize}
+
+\end{document}

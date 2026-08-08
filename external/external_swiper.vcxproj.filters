@@ -13,14 +13,8 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
-    <Filter Include="proc">
-      <UniqueIdentifier>{b4cdad6e-a729-46b3-8ea1-ad505222e27d}</UniqueIdentifier>
-    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="proc.cpp">
-      <Filter>proc</Filter>
-    </ClCompile>
     <ClCompile Include="mineswiper.cpp">
       <Filter>Pliki źródłowe</Filter>
     </ClCompile>
@@ -29,10 +23,13 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="proc.h">
-      <Filter>proc</Filter>
+    <ClInclude Include="process_memory.hpp">
+      <Filter>Pliki nagłówkowe</Filter>
     </ClInclude>
     <ClInclude Include="game.h">
+      <Filter>Pliki nagłówkowe</Filter>
+    </ClInclude>
+    <ClInclude Include="common.h">
       <Filter>Pliki nagłówkowe</Filter>
     </ClInclude>
   </ItemGroup>

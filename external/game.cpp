@@ -1,155 +1,191 @@
 #include "game.h"
-#include "proc.h"
+#include "common.h"
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <print>
+#include <ranges>
+#include <string>
 
-MinesweeperGame::MinesweeperGame()
+MineSwiper::MineSwiper()
 {
-	MinesweeperGame::loadProcHandle();
-	MinesweeperGame::loadConfig();
-	MinesweeperGame::loadMines();
-}
-
-void MinesweeperGame::loadProcHandle()
-{
-	this->procInfo.procId = GetProcId(PROC_NAME);
-	this->procInfo.modBase = GetModuleBaseAddress(this->procInfo.procId, PROC_NAME);
-	this->procInfo.hProcess = OpenProcess(PROCESS_ALL_ACCESS, NULL, this->procInfo.procId);
-}
-
-void MinesweeperGame::loadConfig()
-{
-	// height 0x56A8
-	// width 0x5334
-	uintptr_t heightWidthAddys[2] = { 0x56A8, 0x5334 };
-
-	ReadProcessMemory(this->procInfo.hProcess, (BYTE*)(this->procInfo.modBase + heightWidthAddys[0]), &this->config.heightWidth.height, sizeof(this->config.heightWidth.height), nullptr);
-	ReadProcessMemory(this->procInfo.hProcess, (BYTE*)(this->procInfo.modBase + heightWidthAddys[1]), &this->config.heightWidth.width, sizeof(this->config.heightWidth.width), nullptr);
-
-	//std::cout << "Loaded config\nheight: " << this->config.heightWidth.height << "\nwidth: " << this->config.heightWidth.width << '\n';
-}
-
-// rows are separated by 0x10 byte
-// +0x20 bytes offset each row
-void MinesweeperGame::loadMines()
-{
-	uintptr_t pFirstElementCurrentRow = 0x5361;
-	size_t rowLength = this->config.heightWidth.width;
-
-	for (int i = 0; i < this->config.heightWidth.height; ++i)
+	attach();
+	if (!_process.handle())
 	{
-		this->gameInfo.minefieldVec.push_back(
-			Memory::ReadBytes(this->procInfo.hProcess, this->procInfo.modBase + pFirstElementCurrentRow, rowLength)
-		);
-
-		pFirstElementCurrentRow += 0x20;
-	}
-
-	for (int i = 0; i < this->config.heightWidth.height; ++i)
-	{
-		for (int j = 0; j < rowLength; ++j)
-		{
-			std::byte element = this->gameInfo.minefieldVec.at(i).at(j);
-			int value = std::to_integer<int>(element);
-
-			if (value == 0x8F)
-			{
-				// winmine mine table starts indexing at 1
-				this->gameInfo.mineIdxVec.push_back({ i + 1, j + 1 });
-			}
-		}
-	}
-}
-
-void MinesweeperGame::printMines()
-{
-	std::println("Mines indices:");
-	for (auto element : this->gameInfo.mineIdxVec)
-	{
-		std::print("[{}, {}]\t", element.height, element.width);
-	}
-}
-
-void MinesweeperGame::callChangeFieldState()
-{
-	HANDLE hProc{ this->procInfo.hProcess };
-
-	// why the fuck is this 0x1000?
-	DWORD dwBufferSize = 0x1000;
-
-	void* pMemory = VirtualAllocEx(hProc, NULL, dwBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-	if (!pMemory)
-	{
-		std::print("Failed to allocate memory");
+		std::println("winmine.exe not found or could not be opened.");
 		return;
 	}
 
-	//printf("Allocated memory: %p\nPress any key to continue...\n", pMemory);
-	//std::cin.get();
+	readDimensions();
+	readBoard();
+}
 
-	// why is this 0x200?
-	constexpr DWORD dwCodeSize = 0x200;
+void MineSwiper::attach()
+{
+	_process = Process(winmine::PE_NAME, winmine::IMAGE_BASE);
+}
 
-	unsigned char shellcode[dwCodeSize] = {
-		0xB8, 0x00 ,0x00, 0x00, 0x00,	//mov eax, 0	  // move address of arguments into eax
-		0xFF, 0x30,						//push [eax]	  // push first arg
-		0xFF, 0x70, 0x04,				//push [eax+4]	  // push second 
-		0xB8, 0x00, 0x00, 0x00, 0x00,	//mov eax, 0	  // move address of target function into eax
-		0xFF, 0xD0,						//call eax		  // call function
-		//	0x83, 0xC4, 0x08,			//commented out because its actually stdcall //add esp, 8	  // clean stack (cdecl function, we're responsible for this)
-		0xC3,							//ret			  // return
-		//	0x90						//nop			  // just for alignment.
-	};
+// board dimensions [ref. 3.2]
+void MineSwiper::readDimensions()
+{
+	const HANDLE    proc = _process.handle();
+	const uintptr_t base = _process.modBase();
 
-	int scArgsOffset = 1;
-	int scFuncAddress = 11;
-
-	*(uintptr_t*)(&shellcode[scArgsOffset]) = (uintptr_t)pMemory;
-	*(uintptr_t*)(&shellcode[scFuncAddress]) = this->procInfo.modBase + CHANGE_FIELD_STATE_FUNCTION_OFFSET;
-
-	struct _Args {
-		int row{}; //arg1
-		int column{}; //arg2
-		//char a3{}; // arg3
-		//int retn{}; // retu rn
-	};
-
-	printf("Writing shellcode to memory 1337 :DDD\n");
-	void* pCode = (void*)((uintptr_t)pMemory + 0x8); // 2 args both 4 bytes
-	if (!WriteProcessMemory(hProc, pCode, shellcode, dwCodeSize, nullptr))
+	const auto width  = memory::readValue<DWORD>(proc, base + winmine::offset::BOARD_WIDTH);
+	const auto height = memory::readValue<DWORD>(proc, base + winmine::offset::BOARD_HEIGHT);
+	if (!width || !height)
 	{
-		printf("Mission failed while injecting shellcode...");
-		//VirtualFreeEx(hProc, pMemory, dwBufferSize, MEM_RELEASE);
-		VirtualFreeEx(hProc, pMemory, NULL, MEM_RELEASE);
+		std::println(stderr, "Failed to read board dimensions (error {})",
+			!width ? width.error() : height.error());
 		return;
 	}
 
-	for (auto targetField : this->gameInfo.mineIdxVec)
+	_board = Board{ static_cast<int>(*width), static_cast<int>(*height) };
+}
+
+// modBase + 0x5340 + 32 * row + col
+void MineSwiper::readBoard()
+{
+	namespace rv = std::views;
+
+	const HANDLE    proc = _process.handle();
+	const uintptr_t base = _process.modBase();
+
+	for (const int row : rv::iota(1, _board.height() + 1))
 	{
-		_Args args = { targetField.height, targetField.width };
-
-		std::println("Writing args {{ {}, {} }} to process memory...", args.column, args.row);
-		if (!WriteProcessMemory(hProc, pMemory, &args, sizeof(args), nullptr))
-		{
-			printf("Mission failed while injecting args...");
-			//Passing MEM_RELEASE and a non-zero dwSize parameter to VirtualFree is not allowed.
-			//This results in the failure of this call.
-			//VirtualFreeEx(hProc, pMemory, dwBufferSize, MEM_RELEASE);
-			VirtualFreeEx(hProc, pMemory, NULL, MEM_RELEASE);
-			return;
-		}
-
-		DWORD threadAddy{};
-		HANDLE hThread = CreateRemoteThread(hProc, NULL, NULL, (LPTHREAD_START_ROUTINE)pCode, NULL, CREATE_SUSPENDED, &threadAddy);
-		if (!hThread)
-		{
-			printf("Mission failed while creating remote thread...");
-			VirtualFreeEx(hProc, pMemory, NULL, MEM_RELEASE);
-			return;
-		}
-
-		ResumeThread(hThread);
-		WaitForSingleObject(hThread, INFINITE);
+		const uintptr_t rowAddr = base + winmine::cellOffset(row, 1);
+		memory::read(proc, rowAddr, _board.rowData(row));
 	}
 
-	VirtualFreeEx(hProc, pMemory, NULL, MEM_RELEASE);
+	_mines = rv::cartesian_product(rv::iota(1, _board.height() + 1),
+	                               rv::iota(1, _board.width() + 1))
+		| rv::filter([this](auto rc) {
+			const auto [row, col] = rc;
+			return (_board[row, col] & winmine::cell::MINE_MASK) != 0;
+		})
+		| rv::transform([](auto rc) {
+			const auto [row, col] = rc;
+			return Field{ row, col };
+		})
+		| std::ranges::to<std::vector>();
+}
+
+void MineSwiper::printMines() const
+{
+	std::println("Mine indices (format: [row, column])");
+	for (const Field& mine : _mines)
+		std::print("[{}, {}]\t", mine.row, mine.col);
+}
+
+// table 3.3.
+static char cellChar(byte_t cell)
+{
+	using namespace winmine::cell;
+
+	if (cell & MINE_MASK)                          
+		return (cell & REVEALED_MASK) ? '#' : '*'; // '#' = detonated, '*' = hidden
+
+	const byte_t state = cell & STATE_MASK;       
+	if (state >= 0x01 && state <= 0x08)        
+		return static_cast<char>('0' + state);
+
+	switch (state)
+	{
+	case EMPTY:    return (cell & REVEALED_MASK) ? ' ' : '.';
+	case FLAG:     return 'F';
+	case QUESTION: return '?';
+	case BORDER:   return '#';
+	default:       return '.';                     
+	}
+}
+
+// reveals mines hidden from the player
+void MineSwiper::printMineMap() const
+{
+	namespace rv = std::views;
+
+	if (_board.width() <= 0 || _board.height() <= 0)
+		return;
+
+	std::println("Minefield map  ('*' mine, '#' detonated, 'F' flag, '?' question mark, '.' covered, digit = adjacent mines):");
+
+	const auto header = rv::iota(1, _board.width() + 1)
+		| rv::transform([](int col) { return static_cast<char>('0' + col % 10); })
+		| std::ranges::to<std::string>();
+	std::println("    {}", header);
+
+	for (auto [i, row] : rv::enumerate(_board.rows()))
+		std::println("{:>3} {}", i + 1,
+			row | rv::transform(cellChar) | std::ranges::to<std::string>());
+}
+
+
+// flags every mine
+// by remotely calling winmine.exe function
+// named onRightClickField (+0x374F) function [ref. 3.4]
+struct RemoteAlloc {
+	HANDLE proc = nullptr;
+	void*  ptr  = nullptr;
+
+	~RemoteAlloc() { if (ptr) VirtualFreeEx(proc, ptr, 0, MEM_RELEASE); }
+};
+
+std::expected<void, std::string> MineSwiper::flagMines() const
+{
+	const HANDLE proc = _process.handle();
+
+	// VirtualAllocEx allocates pages of memory
+	// 0x1000 (4 KiB) is the smallest page.
+	constexpr SIZE_T bufferSize = 0x1000;
+	const RemoteAlloc remote{ proc,
+		VirtualAllocEx(proc, nullptr, bufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) };
+	if (!remote.ptr)
+		return std::unexpected("Failed to allocate remote memory");
+
+	constexpr uintptr_t codeOffset = 0x8;
+	void* remoteCode = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(remote.ptr) + codeOffset);
+
+	// call onRightClickField(args.row, args.column)
+	std::array<unsigned char, 18> shellcode = {
+		0xB8, 0, 0, 0, 0,   // mov  eax, <args address>
+		0xFF, 0x30,         // push dword [eax]      ; arg1 (row)
+		0xFF, 0x70, 0x04,   // push dword [eax + 4]  ; arg2 (column)
+		0xB8, 0, 0, 0, 0,   // mov  eax, <function address>
+		0xFF, 0xD0,         // call eax
+		0xC3,               // ret
+	};
+	constexpr std::size_t argsImm = 1;   // "mov eax, <args address>"
+	constexpr std::size_t funcImm = 11;  // "mov eax, <function address>"
+
+	const auto argsAddr = static_cast<std::uint32_t>(reinterpret_cast<uintptr_t>(remote.ptr));
+	const auto funcAddr = static_cast<std::uint32_t>(_process.modBase() + winmine::offset::FN_ON_RIGHT_CLICK_FIELD);
+	std::memcpy(&shellcode[argsImm], &argsAddr, sizeof(argsAddr));
+	std::memcpy(&shellcode[funcImm], &funcAddr, sizeof(funcAddr));
+
+	if (!WriteProcessMemory(proc, remoteCode, shellcode.data(), shellcode.size(), nullptr))
+		return std::unexpected("Failed to inject shellcode");
+
+	struct Args {
+		int row;
+		int column;
+	};
+
+	std::println("Flagging {} mines...", _mines.size());
+	for (const Field& mine : _mines)
+	{
+		const Args args = { mine.row, mine.col };
+		if (!WriteProcessMemory(proc, remote.ptr, &args, sizeof(args), nullptr))
+			return std::unexpected("Failed to write arguments");
+
+		HANDLE thread = CreateRemoteThread(proc, nullptr, 0,
+			reinterpret_cast<LPTHREAD_START_ROUTINE>(remoteCode), nullptr, 0, nullptr);
+		if (!thread)
+			return std::unexpected("Failed to create remote thread");
+
+		WaitForSingleObject(thread, INFINITE);
+		CloseHandle(thread);
+	}
+
+	return {};
 }
