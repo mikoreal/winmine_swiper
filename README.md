@@ -2,7 +2,9 @@
 
 All knowledge used to create the cheating tool was gained through RE process and written up below.
 
-**[Hacking Minesweeper - static and dynamic analysis of `winmine.exe`](hacking-minesweeper-writeup/hacking-minesweeper-writeup.md)**
+**[Hacking Minesweeper: static and dynamic analysis of `winmine.exe` .pdf](hacking-minesweeper-writeup/hacking-minesweeper-writeup.pdf)**
+
+also available in **[.md version](hacking-minesweeper-writeup/hacking-minesweeper-writeup.md)**
 
 The full reverse-engineering process in 19 pages, from `rand` in the import table to `onRightClickField` at offset `0x374F`.
 
